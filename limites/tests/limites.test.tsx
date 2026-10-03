@@ -7,11 +7,21 @@ const BANDA = {
   props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120 },
 } as const
 
-function uso(cincoHoras: number | null, semana: number | null): SessionUsage {
+function uso(cincoHoras: number | null, semana: number | null, reinicio5h?: string): SessionUsage {
   const rateLimits = []
-  if (cincoHoras !== null) rateLimits.push({ kind: 'five_hour', percentUsed: cincoHoras })
+  if (cincoHoras !== null) rateLimits.push({ kind: 'five_hour', percentUsed: cincoHoras, resetsAt: reinicio5h })
   if (semana !== null) rateLimits.push({ kind: 'seven_day', percentUsed: semana })
   return { startedAt: 0, context: { tokens: 1000, window: 200000, percent: 1 }, rateLimits, cost: { usd: 1 } }
+}
+
+// Las pruebas no traen almacén entre sesiones: uno en memoria.
+function hacerDeAlmacen(on: Parameters<Parameters<typeof test>[1]>[1]) {
+  const almacen = new Map<string, unknown>()
+  on('store.get', ($, e) => ({ value: almacen.get(e.key) }))
+  on('store.set', ($, e) => {
+    almacen.set(e.key, e.value)
+    return { value: undefined }
+  })
 }
 
 const PASO = { answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' } as const
@@ -19,6 +29,7 @@ const PASO = { answer: '', durationMs: 1, isAborted: false, turnId: 't', reason:
 test('dibuja los límites de 5 h y semanal en una línea fina', async ($, on) => {
   let ahora = uso(28, 41)
   on('session.usage', () => ({ value: ahora }))
+  hacerDeAlmacen(on)
   // Nada responde por debajo en una prueba: hacemos de motor.
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('turn.complete', () => ({ text: '' }))
@@ -66,4 +77,37 @@ test('dibuja los límites de 5 h y semanal en una línea fina', async ($, on) =>
   await $.turn.complete({ ...PASO, turnId: 't3' })
   const conEncuesta = await $.ui.mount({ ...BANDA, surface: 'terminal', props: { ...BANDA.props, hasSurvey: true } })
   expect(await conEncuesta.find({ text: /5 h/ })).toBeUndefined()
+})
+
+test('antes del primer mensaje enseña lo último guardado, atenuado', async ($, on) => {
+  on('clock.now', () => ({ value: Date.parse('2026-10-03T12:00:00Z') }))
+  // Hace mucho que pasó el reinicio de las 5 h; el semanal no tiene fecha.
+  let ahora = uso(60, 30, '2000-01-01T00:00:00Z')
+  on('session.usage', () => ({ value: ahora }))
+  hacerDeAlmacen(on)
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('turn.complete', () => ({ text: '' }))
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+
+  // Una sesión con cifras las guarda.
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+  // La siguiente arranca sin cifras (aún no hay respuesta): tira de lo guardado.
+  // El de 5 h ya se reinició, así que sale a 0; el semanal, como estaba.
+  ahora = uso(null, null)
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  const banda = await $.ui.mount({ ...BANDA, surface: 'terminal' })
+  expect(await banda.find({ text: /^0%$/ })).toBeDefined()
+  expect(await banda.find({ text: /^30%$/ })).toBeDefined()
+  await banda.unmount()
+
+  // Con la primera respuesta mandan las cifras nuevas.
+  ahora = uso(12, 31)
+  await $.turn.complete({ ...PASO, turnId: 't1' })
+  const despues = await $.ui.mount({ ...BANDA, surface: 'terminal' })
+  expect(await despues.find({ text: /^12%$/ })).toBeDefined()
+  expect(await despues.find({ text: /^31%$/ })).toBeDefined()
 })

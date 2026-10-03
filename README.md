@@ -29,6 +29,11 @@ Cada límite ocupa media línea: la etiqueta con su % y la barra estirada hasta 
   ámbar `#fab219` desde el 75 % y rojo `#d03b3b` desde el 90 %, cada uno sobre su
   pista clara u oscura según el tema. Un aviso único al
   90 % del de 5 h.
+- **Sale nada más abrir la sesión**, antes del primer mensaje: Claude Code no tiene
+  cifras hasta la primera respuesta, así que el mod guarda la última lectura y la
+  enseña **atenuada** hasta entonces (a 0 % la ventana que ya se haya reiniciado).
+  Puede quedarse corta si mientras tanto se gastó en otro sitio (otro equipo,
+  claude.ai).
 - **Siempre una sola línea**, para no quitar altura al chat. En escritorio las barras
   son SVG finas (4 px, redondeadas) estiradas al ancho del hueco; en la terminal, una
   línea de texto (`━━━───`) de tantas casillas como quepan.

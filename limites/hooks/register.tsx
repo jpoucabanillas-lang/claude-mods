@@ -5,7 +5,7 @@
 // Solo pregunta a Claude Code sus propias cifras de uso (gratis) y las dibuja.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 
 import type { Limites } from '../types'
 
@@ -61,12 +61,40 @@ function barraTexto(pct: number, casillas: number) {
 // Un solo aviso por sesión cuando el límite de 5 h se acerca al final.
 let avisado = false
 
-// Pide las cifras a Claude Code y las guarda; guardar redibuja la línea.
+// Lo último medido, guardado entre sesiones en el almacén del mod. Claude Code no
+// tiene cifras de límites hasta la primera respuesta de la sesión, así que sin
+// esto la línea no salía hasta enviar el primer mensaje.
+type Lectura = { pct: number; reinicio?: string }
+type Ultima = { cincoHoras: Lectura | null; semana: Lectura | null }
+
+function lectura(rateLimits: SessionRateLimit[], kind: string): Lectura | null {
+  const r = rateLimits.find(r => r.kind === kind)
+  return r ? { pct: r.percentUsed, reinicio: r.resetsAt } : null
+}
+
+// Si la ventana ya se reinició desde que se guardó, está a 0 diga lo que diga.
+function vigente(l: Lectura | null, ahora: number) {
+  if (l === null) return null
+  if (l.reinicio && Date.parse(l.reinicio) <= ahora) return 0
+  return l.pct
+}
+
+// Pide las cifras a Claude Code, las guarda y las pone en la línea (guardar
+// redibuja). Devuelve false si no había ninguna: antes de la primera respuesta,
+// o por API, donde no hay límites.
 async function medir($: EngineInterface) {
   const { rateLimits } = await $.session.usage()
+  const ultima: Ultima = {
+    cincoHoras: lectura(rateLimits, 'five_hour'),
+    semana: lectura(rateLimits, 'seven_day'),
+  }
+  if (ultima.cincoHoras === null && ultima.semana === null) return false
+
+  await $.store.set('ultima', ultima)
   const nuevos: Limites = {
-    cincoHoras: rateLimits.find(r => r.kind === 'five_hour')?.percentUsed ?? null,
-    semana: rateLimits.find(r => r.kind === 'seven_day')?.percentUsed ?? null,
+    cincoHoras: ultima.cincoHoras?.pct ?? null,
+    semana: ultima.semana?.pct ?? null,
+    deMemoria: false,
   }
   await update($, actuales, () => nuevos)
 
@@ -74,12 +102,27 @@ async function medir($: EngineInterface) {
     avisado = true
     $.ui.toast(`Llevas el ${nuevos.cincoHoras}% del límite de 5 horas`)
   }
+  return true
+}
+
+// Al abrir una sesión, mientras no hay cifras nuevas: lo último que se guardó.
+// Puede quedarse corto si desde entonces se gastó en otro sitio (otro equipo,
+// claude.ai), por eso se dibuja atenuado hasta la primera respuesta.
+async function recordar($: EngineInterface) {
+  const ultima = (await $.store.get('ultima')) as Ultima | undefined
+  if (!ultima) return
+  const ahora = await $.clock.now()
+  await update($, actuales, () => ({
+    cincoHoras: vigente(ultima.cincoHoras, ahora),
+    semana: vigente(ultima.semana, ahora),
+    deMemoria: true,
+  }))
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const resultado = await next(e)
-    await medir($)
+    if (!(await medir($))) await recordar($)
     return resultado
   })
 
@@ -87,7 +130,9 @@ export const register: Register = on => {
   // cada paso (también los de subagentes: gastan del mismo límite).
   on('turn.complete', async ($, e, next) => {
     const resultado = await next(e)
-    await medir($)
+    // Una respuesta sin cifras es que no hay límites (por API): fuera la línea,
+    // también lo que se había recordado.
+    if (!(await medir($))) await update($, actuales, () => null)
     return resultado
   })
 
@@ -120,7 +165,7 @@ export const register: Register = on => {
                   y la banda doblaría su altura (pasó en la app de escritorio). */}
               <Box flexShrink={0}>
                 <Text wrap="truncate">
-                  <Text dimColor>{nombre}</Text> {pct}%
+                  <Text dimColor>{nombre}</Text> <Text dimColor={l.deMemoria}>{pct}%</Text>
                 </Text>
               </Box>
               {Svg ? (
