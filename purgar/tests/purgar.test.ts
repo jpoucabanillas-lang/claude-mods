@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { aligerar, amortizacion, avisoDeAhorro, caracteres, quedarse } from '../hooks/register'
+import { aligerar, aligerarLlamada, amortizacion, avisoDeAhorro, caracteres, quedarse } from '../hooks/register'
 import type { SessionMessage } from 'claude-code'
 
 // Una conversación de prueba: `n` intercambios, cada uno con tu mensaje, una
@@ -78,13 +78,13 @@ test('purga las salidas largas menos las 10 últimas, aunque estén en el mismo 
   expect(r[3].handle).toBe('f1')
   // Las 10 últimas salidas, sin tocar.
   for (let i = 4; i < 14; i++) expect(r[i * 4 + 2].handle).toBe(`r${i + 1}`)
-  expect(recorte.aviso).toBe('Purgadas 4 salidas viejas: 10k caracteres menos')
+  expect(recorte.aviso).toBe('Purgadas 4 salidas y 0 llamadas viejas: 10k caracteres menos')
 
   // Todo en un solo intercambio (un mensaje tuyo y 14 comandos): igual.
   const unSolo = mensajes.filter((m, i) => i === 0 || !(m.role === 'user' && !m.toolResults))
   const r2 = aligerar(unSolo)
   if ('saltar' in r2) throw new Error(`se saltó: ${r2.saltar}`)
-  expect(r2.aviso).toBe('Purgadas 4 salidas viejas: 10k caracteres menos')
+  expect(r2.aviso).toBe('Purgadas 4 salidas y 0 llamadas viejas: 10k caracteres menos')
 })
 
 test('cuenta cuántas peticiones tarda en amortizarse', () => {
@@ -112,12 +112,12 @@ test('/purgar N deja los últimos N intercambios, con una nota delante', async (
 // compactación sin mensajes. Se comprobó en una sesión real.
 test('no purga si no hay nada que ganar', async () => {
   const corta = conversacion(3)
-  expect(aligerar(corta)).toEqual({ saltar: 'Nada que purgar: no hay salidas largas fuera de las últimas' })
+  expect(aligerar(corta)).toEqual({ saltar: 'Nada que purgar: no hay salidas ni llamadas largas fuera de las últimas' })
   expect(quedarse(corta, 5)).toEqual({ saltar: 'Nada que purgar: solo hay 3 intercambios' })
   const sinSalidasLargas = conversacion(15).map(m =>
     m.toolResults ? { ...m, toolResults: m.toolResults.map(r => ({ ...r, text: 'ok' })) } : m,
   )
-  expect(aligerar(sinSalidasLargas)).toEqual({ saltar: 'Nada que purgar: no hay salidas largas fuera de las últimas' })
+  expect(aligerar(sinSalidasLargas)).toEqual({ saltar: 'Nada que purgar: no hay salidas ni llamadas largas fuera de las últimas' })
 })
 
 test('el aviso tras purgar: con la cifra de antes, o estimada si la sesión se retomó', () => {
@@ -146,4 +146,53 @@ test('cuenta lo que se quita en caracteres', () => {
   const quitados = caracteres(mensajes) - caracteres(r.mensajes)
   expect(quitados).toBeGreaterThan(4 * 2200)
   expect(quitados).toBeLessThan(4 * 2400)
+})
+
+test('purga también el código de los Write y los scripts largos de Bash viejos', () => {
+  const codigo = 'const x = 1\n'.repeat(300)
+  const script = "python3 - <<'EOF'\n" + 'print(1)\n'.repeat(200) + 'EOF'
+  const mensajes: SessionMessage[] = [
+    { role: 'user', text: 'escribe el escáner', toolUses: [], handle: 'u1' },
+    {
+      role: 'assistant',
+      text: 'Lo escribo.',
+      toolUses: [
+        { tool_use_id: 'w1', tool: 'Write', input: { file_path: '/p/scanner.py', content: codigo } },
+        { tool_use_id: 'b1', tool: 'Bash', input: { command: script, description: 'Cuenta bloques' } },
+      ],
+      handle: 'a1',
+    },
+    {
+      role: 'user',
+      text: '',
+      toolUses: [],
+      toolResults: [
+        { tool_use_id: 'w1', text: 'ok', isError: false },
+        { tool_use_id: 'b1', text: '1', isError: false },
+      ],
+      handle: 'r1',
+    },
+    ...conversacion(12),
+  ]
+  const r = aligerar(mensajes)
+  if ('saltar' in r) throw new Error(r.saltar)
+  const llamada = r.mensajes[1]
+  expect(llamada.handle).toBeUndefined()
+  expect(llamada.text).toBe('Lo escribo.')
+  expect(llamada.toolUses[0].input).toEqual({
+    file_path: '/p/scanner.py',
+    content: '[Purgado con /purgar: 301 líneas (3600 caracteres)]',
+  })
+  expect(llamada.toolUses[1].input).toEqual({
+    command: "[Purgado con /purgar: 202 líneas (1821 caracteres); empezaba por «python3 - <<'EOF'»]",
+    description: 'Cuenta bloques',
+  })
+  // Sus resultados, cortos, se quedan como estaban.
+  expect(r.mensajes[2].handle).toBe('r1')
+  expect(r.aviso).toMatch(/^Purgadas 2 salidas y 2 llamadas viejas/)
+})
+
+test('una llamada corta no se toca', () => {
+  const u = { tool_use_id: 'e', tool: 'Edit', input: { file_path: '/a', old_string: 'a', new_string: 'b' } }
+  expect(aligerarLlamada(u).input).toEqual(u.input)
 })

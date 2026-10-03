@@ -1,7 +1,9 @@
 // purgar: aligera el contexto de la sesión sin resumirlo.
 //
-// /purgar      cambia las salidas largas de herramientas por una línea que dice
-//              qué eran, menos las 10 últimas; la conversación se queda.
+// /purgar      cambia las salidas largas de herramientas, y los textos largos de
+//              las llamadas (código de un Write, scripts de Bash, Edits), por una
+//              línea que dice qué eran, menos las 10 últimas; la conversación se
+//              queda.
 // /purgar N    deja solo los últimos N intercambios.
 //
 // Va por la compactación de Claude Code (/compact), pero en lugar del resumen,
@@ -19,11 +21,14 @@ const MARCA = 'purgar'
 // cuentan salidas y no intercambios porque un solo intercambio puede llevar
 // decenas de comandos (el 3 oct 2026, proteger los 3 últimos dejó sin purgar lo
 // más pesado de la sesión).
-// ⚠️ limites (botón [Purgar]) repite estas dos reglas para calcular cuánto se
+// ⚠️ limites (botón [Purgar]) repite estas reglas (y CAMPO_LARGO) para calcular cuánto se
 // quitaría: si cambian aquí, cambiarlas allí.
 const PROTEGIDAS = 10
 // Una salida más corta que esto cuesta menos que la línea que la sustituiría.
 const MINIMO = 1000
+// En una llamada larga, los textos de más de esto se purgan; los cortos (rutas,
+// descripciones) se quedan para saber qué fue.
+const CAMPO_LARGO = 200
 // Caracteres por token, para estimar lo quitado cuando no se sabe el contexto de
 // antes. Medido en dos purgas reales el 3 oct 2026: ~1,6 y ~1,9. Repetido en
 // limites, como las dos reglas de arriba.
@@ -68,19 +73,61 @@ function lineas(texto: string) {
 
 type Recorte = { mensajes: SessionMessage[]; aviso: string } | { saltar: string }
 
-// /purgar: las salidas largas, menos las últimas, por una línea.
+// Lo que pesa una llamada: sus argumentos (el código de un Write, el script de un
+// Bash, el texto de un Edit).
+function peso(u: ToolUseSummary) {
+  return JSON.stringify(u.input).length
+}
+
+// Los argumentos de una llamada, con cada texto largo cambiado por lo que medía.
+// Los cortos se quedan (la ruta del archivo, la descripción del comando), para
+// que se sepa qué fue. Lo escrito sigue en disco: se puede volver a leer.
+export function aligerarLlamada(u: ToolUseSummary): ToolUseSummary {
+  const input = Object.fromEntries(
+    Object.entries(u.input).map(([clave, valor]) =>
+      typeof valor === 'string' && valor.length > CAMPO_LARGO
+        ? [
+            clave,
+            `[Purgado con /purgar: ${lineas(valor)} líneas (${valor.length} caracteres)` +
+              (clave === 'command' ? `; empezaba por «${valor.split('\n')[0].slice(0, 80)}»` : '') +
+              `]`,
+          ]
+        : [clave, valor],
+    ),
+  )
+  return { tool_use_id: u.tool_use_id, tool: u.tool, input }
+}
+
+// /purgar: las salidas largas y las llamadas largas, menos las últimas, por una
+// línea que dice qué eran.
 export function aligerar(mensajes: readonly SessionMessage[]): Recorte {
-  // Las salidas que no se tocan: las PROTEGIDAS últimas, cortas o largas.
+  // Las que no se tocan: las PROTEGIDAS últimas, cortas o largas.
   const todas = mensajes.flatMap(m => m.toolResults ?? [])
   const protegidas = new Set(todas.slice(-PROTEGIDAS).map(r => r.tool_use_id))
   const purgable = (r: ToolResultSummary) => r.text.length >= MINIMO && !protegidas.has(r.tool_use_id)
+  const llamadas = mensajes.flatMap(m => m.toolUses)
+  const protegidasLl = new Set(llamadas.slice(-PROTEGIDAS).map(u => u.tool_use_id))
+  const purgableLl = (u: ToolUseSummary) => peso(u) >= MINIMO && !protegidasLl.has(u.tool_use_id)
 
   const usos = new Map<string, ToolUseSummary>()
-  for (const m of mensajes) for (const u of m.toolUses) usos.set(u.tool_use_id, u)
+  for (const u of llamadas) usos.set(u.tool_use_id, u)
 
   let salidas = 0
+  let nLlamadas = 0
   let caracteres = 0
   const nuevos = mensajes.map((m): SessionMessage => {
+    // Una respuesta tuya con llamadas largas: sus argumentos, aligerados.
+    if (m.role === 'assistant' && m.toolUses.some(purgableLl)) {
+      const toolUses = m.toolUses.map(u => {
+        if (!purgableLl(u)) return { tool_use_id: u.tool_use_id, tool: u.tool, input: u.input }
+        const ligera = aligerarLlamada(u)
+        nLlamadas++
+        caracteres += peso(u) - peso(ligera)
+        return ligera
+      })
+      // Sin `handle`: el motor lo construye de nuevo con estas llamadas.
+      return { role: m.role, text: m.text, toolUses }
+    }
     if (!m.toolResults?.some(purgable)) return m
     const resultados = m.toolResults.map((r): ToolResultSummary => {
       if (!purgable(r)) return { tool_use_id: r.tool_use_id, text: r.text, isError: r.isError }
@@ -99,10 +146,10 @@ export function aligerar(mensajes: readonly SessionMessage[]): Recorte {
     return { role: m.role, text: m.text, toolUses: [], toolResults: resultados }
   })
 
-  if (salidas === 0) return { saltar: 'Nada que purgar: no hay salidas largas fuera de las últimas' }
+  if (salidas + nLlamadas === 0) return { saltar: 'Nada que purgar: no hay salidas ni llamadas largas fuera de las últimas' }
   return {
     mensajes: nuevos,
-    aviso: `Purgadas ${salidas} salidas viejas: ${Math.round(caracteres / 1000)}k caracteres menos`,
+    aviso: `Purgadas ${salidas} salidas y ${nLlamadas} llamadas viejas: ${Math.round(caracteres / 1000)}k caracteres menos`,
   }
 }
 
@@ -139,7 +186,11 @@ function k(tokens: number) {
 // Lo que se ve de una conversación, en caracteres: textos y salidas.
 export function caracteres(mensajes: readonly SessionMessage[]) {
   return mensajes.reduce(
-    (n, m) => n + m.text.length + (m.toolResults ?? []).reduce((r, x) => r + x.text.length, 0),
+    (n, m) =>
+      n +
+      m.text.length +
+      (m.toolResults ?? []).reduce((r, x) => r + x.text.length, 0) +
+      m.toolUses.reduce((r, u) => r + JSON.stringify(u.input).length, 0),
     0,
   )
 }

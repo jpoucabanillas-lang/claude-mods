@@ -26,6 +26,7 @@ const CADUCIDAD = 60 * 60_000
 // distintos y no pueden importarse): si cambian allí, cambiarlas aquí.
 const PROTEGIDAS = 10
 const MINIMO = 1000
+const CAMPO_LARGO = 200
 // Caracteres por token de las salidas de herramientas (logs, código). Medido en
 // dos purgas reales el 3 oct 2026: ~1,6 y ~1,9. Se redondea al alza, a 2, para
 // que el botón salga de menos más que de más.
@@ -224,14 +225,24 @@ async function cargarSesion($: EngineInterface) {
   )
 }
 
-// Cuánto quitaría /purgar, en tokens: las salidas largas menos las últimas.
+// Cuánto quitaría /purgar, en tokens: las salidas largas y los textos largos de
+// las llamadas largas (código de un Write, scripts de Bash), menos las últimas.
 async function calcularPurgable($: EngineInterface) {
   if (!hayPurgar) return
-  const salidas = (await $.session.messages()).flatMap(m => m.toolResults ?? [])
-  const caracteres = salidas
+  const mensajes = await $.session.messages()
+  const salidas = mensajes
+    .flatMap(m => m.toolResults ?? [])
     .slice(0, -PROTEGIDAS)
     .filter(r => r.text.length >= MINIMO)
     .reduce((n, r) => n + r.text.length, 0)
+  const llamadas = mensajes
+    .flatMap(m => m.toolUses)
+    .slice(0, -PROTEGIDAS)
+    .filter(u => JSON.stringify(u.input).length >= MINIMO)
+    .flatMap(u => Object.values(u.input))
+    .filter((v): v is string => typeof v === 'string' && v.length > CAMPO_LARGO)
+    .reduce((n, v) => n + v.length, 0)
+  const caracteres = salidas + llamadas
   const purgable = Math.round(caracteres / CARACTERES_POR_TOKEN)
   await update($, actuales, l => (l ? { ...l, purgable } : l))
 }

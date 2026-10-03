@@ -251,3 +251,36 @@ test('al retomar una sesión con la caché caducada, sale [Purgar gratis] antes 
   expect(await banda.find({ type: 'Button' })).toBeUndefined()
   await banda.unmount()
 })
+
+test('cuenta también el código de los Write viejos para el botón', async ($, on) => {
+  mock.clock(on, { now: Date.parse('2026-10-03T12:00:00Z') })
+  on('session.usage', () => ({ value: uso(28, 41, undefined, 100_000) }))
+  hacerDeAlmacen(on)
+  on('command.list', () => ({ value: [{ name: 'purgar', description: '', source: 'plugin' }] }))
+  // 15 Write de 9000 caracteres sin salidas largas: 5 viejos, 45 000 ≈ 22k.
+  // Luego 20 Write: 10 viejos, 90 000 ≈ 45k, el 45 %.
+  let n = 15
+  const escritos = () =>
+    Array.from({ length: n }, (_, i) => ({
+      role: 'assistant' as const,
+      text: '',
+      toolUses: [{ tool_use_id: `w${i}`, tool: 'Write', input: { file_path: `/f${i}`, content: 'x'.repeat(9000) } }],
+    }))
+  on('session.messages', () => ({ value: escritos() }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('turn.complete', () => ({ text: '' }))
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+
+  await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+  let banda = await $.ui.mount({ ...BANDA, surface: 'terminal' })
+  expect(await banda.find({ type: 'Button' })).toBeUndefined()
+  await banda.unmount()
+
+  n = 20
+  await $.turn.complete({ ...PASO, turnId: 't1' })
+  banda = await $.ui.mount({ ...BANDA, surface: 'terminal' })
+  expect(await banda.find({ text: /^Purgar$/ })).toBeDefined()
+})

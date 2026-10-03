@@ -1,5 +1,5 @@
 {
   "name": "purgar",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "/purgar: quita del contexto las salidas viejas de herramientas, sin resumen y sin gastar modelo; /purgar N deja solo los últimos N intercambios"
 }

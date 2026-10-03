@@ -80,6 +80,14 @@ Aligera el contexto de la sesión **sin resumirlo**:
   existió y la vuelve a pedir si le hace falta. **Las 10 últimas salidas no se tocan**,
   se cuentan salidas y no intercambios, porque uno solo puede llevar decenas de comandos.
   Tus mensajes y sus respuestas se quedan todos.
+- **También las llamadas largas de Claude** (desde la 0.4.0): el código de un Write, los
+  scripts de Bash, los textos de un Edit. Cada texto de más de 200 caracteres pasa a
+  `[Purgado con /purgar: 301 líneas (3600 caracteres)]`; los cortos (la ruta del archivo,
+  la descripción del comando) se quedan, para saber qué fue. Lo escrito sigue en disco.
+  En las sesiones de programar es lo que más pesa: en la de whale-scanner (3 oct 2026)
+  eran 242k caracteres, frente a 94k de salidas largas. Las 10 últimas llamadas tampoco
+  se tocan. ⚠️ Esto reescribe los mensajes de Claude, no solo los resultados: **aún sin
+  probar en una sesión real**.
 - **`/purgar N`**: deja solo los últimos N intercambios, con una nota delante para que
   Claude sepa que hubo más. Como un `/clear` que conserva el hilo reciente.
 
