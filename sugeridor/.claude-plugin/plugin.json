@@ -1,0 +1,1 @@
+{ "name": "sugeridor", "version": "0.2.0", "description": "Al parar de escribir 2 s, propone el prompt de tu librería que encaja con lo que llevas escrito", "types": "./types/index.d.ts" }

@@ -8,6 +8,16 @@
       "name": "limites",
       "source": "./limites",
       "description": "Una línea fina encima del prompt con el uso de los límites de 5 horas y semanal"
+    },
+    {
+      "name": "sugeridor",
+      "source": "./sugeridor",
+      "description": "Al parar de escribir 2 s, propone encima de la caja el prompt de tu librería que encaja, con «Usar» para ponerlo"
+    },
+    {
+      "name": "purgar",
+      "source": "./purgar",
+      "description": "/purgar quita del contexto las salidas viejas de herramientas, sin resumen y sin gastar modelo; /purgar N deja solo los últimos N intercambios"
     }
   ]
 }

@@ -11,6 +11,31 @@ import type { Limites } from '../types'
 
 const actuales = atom({ plugin: 'limites', key: 'actuales' } as const, null)
 
+// El botón [Purgar] sale cuando /purgar quitaría al menos esta parte del
+// contexto: purgar pierde la caché y la siguiente petición la reescribe entera,
+// así que quitar poco cuesta más de lo que ahorra (medido el 3 oct 2026: quitar
+// el 19 % tardaba unas 80 peticiones en amortizarse; el 40 %, unas 25).
+const PARTE_PURGA = 0.4
+// Las reglas de /purgar, repetidas de purgar/hooks/register.ts (son mods
+// distintos y no pueden importarse): si cambian allí, cambiarlas aquí.
+const PROTEGIDAS = 10
+const MINIMO = 1000
+// Caracteres por token de las salidas de herramientas (logs, código), a la baja:
+// mejor que el botón salga de menos que de más.
+const CARACTERES_POR_TOKEN = 3
+// Si el mod purgar está instalado (su /purgar existe). Sin él no hay botón.
+let hayPurgar = false
+
+// La hora a la que se reinicia la ventana, en la hora local del equipo: "16:14".
+// null si no hay fecha. (El entorno del mod tiene la zona horaria del sistema:
+// comprobado el 3 oct 2026, sale Europe/Madrid.)
+function horaDeReinicio(reinicio: string | null) {
+  if (!reinicio) return null
+  const d = new Date(reinicio)
+  if (Number.isNaN(d.getTime())) return null
+  return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
 // Los colores de la gráfica de uso de claude.ai (Ajustes → Uso), sacados de la
 // página el 3 oct 2026: el relleno es --cds-role-<tono>-fill, el mismo en los dos
 // temas, y la pista --cds-role-<tono>-100 en tema claro y -800 en el oscuro.
@@ -83,24 +108,38 @@ function vigente(l: Lectura | null, ahora: number) {
 // redibuja). Devuelve false si no había ninguna: antes de la primera respuesta,
 // o por API, donde no hay límites.
 async function medir($: EngineInterface) {
-  const { rateLimits } = await $.session.usage()
+  const { rateLimits, context } = await $.session.usage()
   const ultima: Ultima = {
     cincoHoras: lectura(rateLimits, 'five_hour'),
     semana: lectura(rateLimits, 'seven_day'),
   }
   if (ultima.cincoHoras === null && ultima.semana === null) return false
 
+  if (!hayPurgar) {
+    // Si no se puede saber, sin botón: la barra sigue igual.
+    hayPurgar = await $.command.list().then(
+      l => l.some(c => c.name === 'purgar'),
+      () => false,
+    )
+  }
+
   await $.store.set('ultima', ultima)
   const nuevos: Limites = {
     cincoHoras: ultima.cincoHoras?.pct ?? null,
     semana: ultima.semana?.pct ?? null,
     deMemoria: false,
+    reinicio5h: ultima.cincoHoras?.reinicio ?? null,
+    contexto: context.percent ?? null,
+    tokens: context.tokens ?? 0,
+    purgable: 0,
   }
-  await update($, actuales, () => nuevos)
+  // Lo purgable se calcula aparte y solo al acabar cada turno: aquí se conserva.
+  await update($, actuales, l => ({ ...nuevos, purgable: l?.purgable ?? 0 }))
 
   if (nuevos.cincoHoras !== null && nuevos.cincoHoras >= 90 && !avisado) {
     avisado = true
-    $.ui.toast(`Llevas el ${nuevos.cincoHoras}% del límite de 5 horas`)
+    const hora = horaDeReinicio(nuevos.reinicio5h)
+    $.ui.toast(`Llevas el ${nuevos.cincoHoras}% del límite de 5 horas` + (hora ? `; se reinicia a las ${hora}` : ''))
   }
   return true
 }
@@ -112,75 +151,155 @@ async function recordar($: EngineInterface) {
   const ultima = (await $.store.get('ultima')) as Ultima | undefined
   if (!ultima) return
   const ahora = await $.clock.now()
+  const reinicio = ultima.cincoHoras?.reinicio
   await update($, actuales, () => ({
     cincoHoras: vigente(ultima.cincoHoras, ahora),
     semana: vigente(ultima.semana, ahora),
     deMemoria: true,
+    // Si ya pasó, la ventana nueva aún no tiene hora: vuelve la etiqueta "5 h".
+    reinicio5h: reinicio && Date.parse(reinicio) > ahora ? reinicio : null,
+    // El contexto es de esta sesión: hasta la primera respuesta no se sabe.
+    contexto: null,
+    tokens: 0,
+    purgable: 0,
   }))
+}
+
+// Cuánto quitaría /purgar, en tokens: las salidas largas menos las últimas.
+async function calcularPurgable($: EngineInterface) {
+  if (!hayPurgar) return
+  const salidas = (await $.session.messages()).flatMap(m => m.toolResults ?? [])
+  const caracteres = salidas
+    .slice(0, -PROTEGIDAS)
+    .filter(r => r.text.length >= MINIMO)
+    .reduce((n, r) => n + r.text.length, 0)
+  const purgable = Math.round(caracteres / CARACTERES_POR_TOKEN)
+  await update($, actuales, l => (l ? { ...l, purgable } : l))
+}
+
+// Cada minuto: si la ventana de 5 h acaba de reiniciarse, la pone a 0 sin esperar
+// a la siguiente respuesta (que traerá la hora nueva).
+let pararReloj: (() => void) | undefined
+function arrancarReloj($: EngineInterface) {
+  pararReloj?.()
+  pararReloj = $.clock.every(60_000, async () => {
+    const ahora = await $.clock.now()
+    await update($, actuales, l =>
+      l && l.reinicio5h && Date.parse(l.reinicio5h) <= ahora ? { ...l, cincoHoras: 0, reinicio5h: null } : l,
+    )
+  })
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const resultado = await next(e)
     if (!(await medir($))) await recordar($)
+    await calcularPurgable($)
+    arrancarReloj($)
     return resultado
   })
 
-  // Las cifras llegan con cada respuesta de la API, así que se miden al acabar
-  // cada paso (también los de subagentes: gastan del mismo límite).
+  // Las cifras llegan con cada respuesta de la API: se miden al acabar cada turno
+  // (también los de subagentes: gastan del mismo límite), y durante el turno tras
+  // cada herramienta (abajo).
   on('turn.complete', async ($, e, next) => {
     const resultado = await next(e)
     // Una respuesta sin cifras es que no hay límites (por API): fuera la línea,
     // también lo que se había recordado.
     if (!(await medir($))) await update($, actuales, () => null)
+    else await calcularPurgable($)
+    return resultado
+  })
+
+  // Durante un turno largo también: tras cada herramienta ya hay una respuesta
+  // nueva con cifras. Sin esperar, para no retrasar la herramienta.
+  on('tool.call', async ($, e, next) => {
+    const resultado = await next(e)
+    void medir($).catch(() => {})
     return resultado
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // Lo que dibujen los mods de debajo (el sugeridor de prompts, por ejemplo) va
+    // debajo de la barra: si se devolviera solo la barra, no se verían nunca.
+    const debajo = await next(e)
     const l = await read($, actuales)
     // Sin límites (por API, o antes de la primera respuesta) no se dibuja nada.
-    if (e.props.hasSurvey || l === null || (l.cincoHoras === null && l.semana === null)) return next(e)
+    if (e.props.hasSurvey || l === null || (l.cincoHoras === null && l.semana === null)) return debajo
 
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     // Solo el escritorio sabe dibujar SVG; la terminal usa la barra de texto.
     const Svg = e.surface === 'desktop' ? $.ui.resolve(e).Svg : undefined
 
+    // A la derecha, el % de contexto y, cuando compensa, el botón de purgar. No
+    // mientras trabaja: la compactación no se puede lanzar a mitad de un turno.
+    const contexto = l.contexto === null ? null : `contexto ${l.contexto}%`
+    const conBoton = hayPurgar && l.tokens > 0 && l.purgable >= PARTE_PURGA * l.tokens && !e.props.isWorking
+    const purgar = () => {
+      $.command.run({ command: 'purgar' }).catch((err: unknown) => {
+        $.ui.toast(`No se pudo purgar: ${err instanceof Error ? err.message : String(err)}`)
+      })
+    }
+    // Lo que ocupa en la terminal: la etiqueta, y "[ Purgar ]" con su hueco.
+    const anchoDerecha = (contexto?.length ?? 0) + (conBoton ? 11 : 0)
+
     // Una línea con los dos límites, cada uno en su mitad: "5 h 28%" y la barra
     // estirada hasta el final de su mitad. Siempre una sola línea de alto.
+    // El de 5 h se nombra por la hora a la que se reinicia ("hasta 16:14 28%");
+    // "5 h" solo mientras no se sabe.
+    const hora = horaDeReinicio(l.reinicio5h)
     const medidores = [
-      { nombre: '5 h', pct: l.cincoHoras },
+      { nombre: hora ? `hasta ${hora}` : '5 h', pct: l.cincoHoras },
       { nombre: 'semana', pct: l.semana },
     ].filter((m): m is { nombre: string; pct: number } => m.pct !== null)
     const SEPARACION = 4
-    const mitad = Math.floor((e.props.bodyColumns - SEPARACION * (medidores.length - 1)) / medidores.length)
+    const huecos = medidores.length - 1 + (anchoDerecha > 0 ? 1 : 0)
+    const mitad = Math.floor((e.props.bodyColumns - anchoDerecha - SEPARACION * huecos) / medidores.length)
 
     return (
-      <Box alignItems="center" flexWrap="nowrap" overflow="hidden" columnGap={SEPARACION}>
-        {medidores.map(({ nombre, pct }) => {
-          const etiqueta = `${nombre} ${pct}%`
-          const { lleno, vacio } = barraTexto(pct, mitad - etiqueta.length - 1)
-          return (
-            <Box key={nombre} flexGrow={1} alignItems="center" columnGap={1}>
-              {/* La etiqueta no encoge nunca: si encogiera, partiría en dos líneas
-                  y la banda doblaría su altura (pasó en la app de escritorio). */}
-              <Box flexShrink={0}>
-                <Text wrap="truncate">
-                  <Text dimColor>{nombre}</Text> <Text dimColor={l.deMemoria}>{pct}%</Text>
-                </Text>
-              </Box>
-              {Svg ? (
-                <Box flexGrow={1} flexShrink={1}>
-                  <Svg source={barraSvg(pct)} alt={`${nombre}: ${pct}% usado`} height={ALTO} />
+      <Box flexDirection="column">
+        <Box alignItems="center" flexWrap="nowrap" overflow="hidden" columnGap={SEPARACION}>
+          {medidores.map(({ nombre, pct }) => {
+            const etiqueta = `${nombre} ${pct}%`
+            const { lleno, vacio } = barraTexto(pct, mitad - etiqueta.length - 1)
+            return (
+              <Box key={nombre} flexGrow={1} alignItems="center" columnGap={1}>
+                {/* La etiqueta no encoge nunca: si encogiera, partiría en dos líneas
+                    y la banda doblaría su altura (pasó en la app de escritorio). */}
+                <Box flexShrink={0}>
+                  <Text wrap="truncate">
+                    <Text dimColor>{nombre}</Text> <Text dimColor={l.deMemoria}>{pct}%</Text>
+                  </Text>
                 </Box>
-              ) : (
-                <Text>
-                  <Text color={tono(pct).relleno}>{lleno}</Text>
-                  <Text dimColor>{vacio}</Text>
+                {Svg ? (
+                  <Box flexGrow={1} flexShrink={1}>
+                    <Svg source={barraSvg(pct)} alt={`${nombre}: ${pct}% usado`} height={ALTO} />
+                  </Box>
+                ) : (
+                  <Text>
+                    <Text color={tono(pct).relleno}>{lleno}</Text>
+                    <Text dimColor>{vacio}</Text>
+                  </Text>
+                )}
+              </Box>
+            )
+          })}
+          {anchoDerecha > 0 ? (
+            <Box flexShrink={0} alignItems="center" columnGap={1}>
+              {contexto ? (
+                <Text wrap="truncate" dimColor>
+                  {contexto}
                 </Text>
-              )}
+              ) : null}
+              {conBoton ? (
+                <Button key="purgar" dimColor onPress={purgar}>
+                  Purgar
+                </Button>
+              ) : null}
             </Box>
-          )
-        })}
+          ) : null}
+        </Box>
+        {debajo}
       </Box>
     )
   })
