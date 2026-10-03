@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { aligerar, amortizacion, quedarse } from '../hooks/register'
+import { aligerar, amortizacion, avisoDeAhorro, caracteres, quedarse } from '../hooks/register'
 import type { SessionMessage } from 'claude-code'
 
 // Una conversación de prueba: `n` intercambios, cada uno con tu mensaje, una
@@ -118,4 +118,32 @@ test('no purga si no hay nada que ganar', async () => {
     m.toolResults ? { ...m, toolResults: m.toolResults.map(r => ({ ...r, text: 'ok' })) } : m,
   )
   expect(aligerar(sinSalidasLargas)).toEqual({ saltar: 'Nada que purgar: no hay salidas largas fuera de las últimas' })
+})
+
+test('el aviso tras purgar: con la cifra de antes, o estimada si la sesión se retomó', () => {
+  expect(avisoDeAhorro(292_500, 0, 236_800, false)).toBe('Purga: 293k → 237k de contexto (−19 %); se amortiza en unas 80 peticiones')
+  // La prueba de bot dca (3 oct 2026): sesión retomada, 255 000 caracteres
+  // quitados, 184k después; la real de antes era 319k.
+  expect(avisoDeAhorro(undefined, 255_000, 184_157)).toBe(
+    'Purga: ~312k → 184k de contexto (−41 %, estimado). Si la sesión llevaba más de 1 h parada, ' +
+      'ha salido gratis; si no, se amortiza en unas 27 peticiones',
+  )
+  // Con registro de la sesión: la cifra real de antes, y se sabe si salió gratis.
+  expect(avisoDeAhorro(319_317, 255_000, 184_157, true)).toBe(
+    'Purga: 319k → 184k de contexto (−42 %). Gratis: la caché ya había caducado',
+  )
+  expect(avisoDeAhorro(319_317, 255_000, 184_157, false)).toBe(
+    'Purga: 319k → 184k de contexto (−42 %); se amortiza en unas 25 peticiones',
+  )
+  expect(avisoDeAhorro(200_000, 0, 200_000)).toBe('La purga no bajó el contexto (200k → 200k)')
+})
+
+test('cuenta lo que se quita en caracteres', () => {
+  const mensajes = conversacion(14)
+  const r = aligerar(mensajes)
+  if ('saltar' in r) throw new Error(r.saltar)
+  // 4 salidas de 2400 caracteres, cambiadas por líneas de unos 160.
+  const quitados = caracteres(mensajes) - caracteres(r.mensajes)
+  expect(quitados).toBeGreaterThan(4 * 2200)
+  expect(quitados).toBeLessThan(4 * 2400)
 })

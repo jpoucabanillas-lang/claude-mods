@@ -23,6 +23,7 @@ function hacerDeAlmacen(on: Parameters<Parameters<typeof test>[1]>[1]) {
     almacen.set(e.key, e.value)
     return { value: undefined }
   })
+  return almacen
 }
 
 const PASO = { answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' } as const
@@ -215,4 +216,38 @@ test('durante un turno largo se actualiza tras cada herramienta', async ($, on) 
   await $.tool.call({ tool: 'Bash', input: { command: 'ls' } })
   const banda = await $.ui.mount({ ...BANDA, surface: 'terminal' })
   expect(await banda.find({ text: /^5 h 15%$/ })).toBeDefined()
+})
+
+test('al retomar una sesión con la caché caducada, sale [Purgar gratis] antes del primer mensaje', async ($, on) => {
+  const AHORA = Date.parse('2026-10-03T12:00:00Z')
+  mock.clock(on, { now: AHORA })
+  // Retomada: Claude Code aún no tiene cifras (ni límites ni contexto).
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1_000_000 }, rateLimits: [] } }))
+  const almacen = hacerDeAlmacen(on)
+  on('session.id', () => ({ value: 'sesion-vieja' }))
+  on('command.list', () => ({ value: [{ name: 'purgar', description: '', source: 'plugin' }] }))
+  // 14 salidas: 4 viejas, 36 000 caracteres ≈ 18k tokens.
+  on('session.messages', () => ({ value: salidas(14) }))
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
+  const arrancar = async (haceMin: number) => {
+    almacen.set('ultima', { cincoHoras: { pct: 30 }, semana: { pct: 40 } })
+    almacen.set('sesiones', { 'sesion-vieja': { t: AHORA - haceMin * 60_000, tokens: 150_000 } })
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+    return $.ui.mount({ ...BANDA, surface: 'terminal' })
+  }
+
+  // Parada hace 2 h: 18k de 150k, el 12 %. Gratis, así que sale.
+  let banda = await arrancar(120)
+  expect(await banda.find({ text: /^contexto 15%$/ })).toBeDefined()
+  expect(await banda.find({ text: /Purgar gratis/ })).toBeDefined()
+  await banda.unmount()
+
+  // Parada hace 10 min: la caché sigue viva y el 12 % no compensa.
+  banda = await arrancar(10)
+  expect(await banda.find({ type: 'Button' })).toBeUndefined()
+  await banda.unmount()
 })

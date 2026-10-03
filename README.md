@@ -52,6 +52,12 @@ A la derecha, el % de la ventana de contexto de la sesión.
   caracteres por token (medido en dos purgas reales: ~1,6 y ~1,9). Por debajo del 40 %, perder la caché cuesta más de lo
   que se ahorra, así que si sale el botón, compensa. No sale mientras Claude está
   trabajando. Pulsarlo es lo mismo que escribir `/purgar`.
+- **[Purgar gratis]**: si la sesión lleva más de 1 h sin actividad, su caché ya ha
+  caducado y la siguiente petición la reescribe entera igualmente. Entonces purgar no
+  pierde nada, y el botón sale desde el **10 %**. Al retomar una sesión vieja sale
+  **antes del primer mensaje**, que es el momento bueno. Para eso el mod apunta en su
+  almacén, por sesión, cuándo tuvo actividad y con cuánto contexto (las 30 últimas):
+  las sesiones que no se hayan usado con esta versión aún no tienen registro.
 - **Se actualiza durante el turno**, tras cada herramienta, y no solo al acabar: en un
   turno largo se quedaba con la cifra del principio.
 - **Por API no sale nada**: ahí no hay límites (la terminal del Mac va con «API Usage
@@ -85,7 +91,10 @@ herramienta de su resultado.
 
 Tras la primera respuesta después de purgar, un aviso dice el ahorro real y cuánto
 tarda en recuperarse: «Purga: 292k → 237k de contexto (−19 %); se amortiza en unas 80
-peticiones».
+peticiones», o «Gratis: la caché ya había caducado» si llevaba más de 1 h parada. Lo
+sabe por un registro propio, por sesión, igual que el de `limites`. En una sesión sin
+registro (retomada y sin usar desde que se instaló esta versión) estima el contexto de
+antes con lo quitado y lo marca como «estimado».
 
 **Cuándo compensa**: cada paso de Claude relee todo el contexto (de caché, más barato,
 pero en una sesión larga es la mayor parte del gasto). Purgar pierde la caché, y el

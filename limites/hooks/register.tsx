@@ -16,6 +16,12 @@ const actuales = atom({ plugin: 'limites', key: 'actuales' } as const, null)
 // así que quitar poco cuesta más de lo que ahorra (medido el 3 oct 2026: quitar
 // el 19 % tardaba unas 80 peticiones en amortizarse; el 40 %, unas 25).
 const PARTE_PURGA = 0.4
+// Con la caché ya caducada (más de 1 h sin actividad) purgar sale gratis: la
+// siguiente petición la reescribe entera igualmente. Basta con que quite algo
+// que se note. Segunda prueba real (3 oct 2026): una sesión de una semana, −42 %
+// desde el primer mensaje.
+const PARTE_PURGA_GRATIS = 0.1
+const CADUCIDAD = 60 * 60_000
 // Las reglas de /purgar, repetidas de purgar/hooks/register.ts (son mods
 // distintos y no pueden importarse): si cambian allí, cambiarlas aquí.
 const PROTEGIDAS = 10
@@ -26,6 +32,31 @@ const MINIMO = 1000
 const CARACTERES_POR_TOKEN = 2
 // Si el mod purgar está instalado (su /purgar existe). Sin él no hay botón.
 let hayPurgar = false
+
+// Por sesión: cuándo tuvo actividad por última vez y con cuánto contexto, en el
+// almacén. Al retomar una sesión es lo único que dice su contexto (Claude Code
+// no lo sabe hasta la primera respuesta) y si su caché ya caducó, que es justo
+// cuando purgar sale gratis: antes de ese primer mensaje. ⚠️ purgar lleva su
+// propio registro igual, en su almacén.
+type Registro = Record<string, { t: number; tokens: number }>
+const SESIONES_GUARDADAS = 30
+// La última actividad de esta sesión, para el reloj.
+let ultimaActividad: number | undefined
+
+// El id de la sesión, o undefined si no se puede saber (sin registro, entonces).
+function idSesion($: EngineInterface) {
+  return $.session.id().catch(() => undefined)
+}
+
+async function apuntarSesion($: EngineInterface, ahora: number, tokens: number) {
+  const id = await idSesion($)
+  if (!id || !tokens) return
+  const registro = ((await $.store.get('sesiones')) as Registro | undefined) ?? {}
+  const recientes = Object.entries({ ...registro, [id]: { t: ahora, tokens } })
+    .sort(([, a], [, b]) => b.t - a.t)
+    .slice(0, SESIONES_GUARDADAS)
+  await $.store.set('sesiones', Object.fromEntries(recientes))
+}
 
 // La hora a la que se reinicia la ventana, en la hora local del equipo: "16:14".
 // null si no hay fecha. (El entorno del mod tiene la zona horaria del sistema:
@@ -108,7 +139,9 @@ function vigente(l: Lectura | null, ahora: number) {
 // Pide las cifras a Claude Code, las guarda y las pone en la línea (guardar
 // redibuja). Devuelve false si no había ninguna: antes de la primera respuesta,
 // o por API, donde no hay límites.
-async function medir($: EngineInterface) {
+// `actividad`: si esta medida es de una respuesta nueva (al abrir la sesión no lo
+// es: entonces no dice nada de si la caché sigue viva).
+async function medir($: EngineInterface, actividad = true) {
   const { rateLimits, context } = await $.session.usage()
   const ultima: Ultima = {
     cincoHoras: lectura(rateLimits, 'five_hour'),
@@ -116,15 +149,11 @@ async function medir($: EngineInterface) {
   }
   if (ultima.cincoHoras === null && ultima.semana === null) return false
 
-  if (!hayPurgar) {
-    // Si no se puede saber, sin botón: la barra sigue igual.
-    hayPurgar = await $.command.list().then(
-      l => l.some(c => c.name === 'purgar'),
-      () => false,
-    )
-  }
-
   await $.store.set('ultima', ultima)
+  if (actividad) {
+    ultimaActividad = await $.clock.now()
+    await apuntarSesion($, ultimaActividad, context.tokens ?? 0)
+  }
   const nuevos: Limites = {
     cincoHoras: ultima.cincoHoras?.pct ?? null,
     semana: ultima.semana?.pct ?? null,
@@ -133,9 +162,15 @@ async function medir($: EngineInterface) {
     contexto: context.percent ?? null,
     tokens: context.tokens ?? 0,
     purgable: 0,
+    frio: false,
   }
   // Lo purgable se calcula aparte y solo al acabar cada turno: aquí se conserva.
-  await update($, actuales, l => ({ ...nuevos, purgable: l?.purgable ?? 0 }))
+  // Una respuesta nueva deja la caché viva; si no lo es, sigue como estaba.
+  await update($, actuales, l => ({
+    ...nuevos,
+    purgable: l?.purgable ?? 0,
+    frio: actividad ? false : (l?.frio ?? false),
+  }))
 
   if (nuevos.cincoHoras !== null && nuevos.cincoHoras >= 90 && !avisado) {
     avisado = true
@@ -163,7 +198,30 @@ async function recordar($: EngineInterface) {
     contexto: null,
     tokens: 0,
     purgable: 0,
+    frio: false,
   }))
+}
+
+// Al abrir una sesión: lo que el registro sabe de ella. El contexto, si Claude
+// Code aún no lo da, y si la caché ya caducó.
+async function cargarSesion($: EngineInterface) {
+  const id = await idSesion($)
+  if (!id) return
+  const r = (((await $.store.get('sesiones')) as Registro | undefined) ?? {})[id]
+  if (!r) return
+  ultimaActividad = r.t
+  const frio = (await $.clock.now()) - r.t > CADUCIDAD
+  const { context } = await $.session.usage()
+  await update($, actuales, l =>
+    l
+      ? {
+          ...l,
+          frio,
+          tokens: l.tokens || r.tokens,
+          contexto: l.contexto ?? Math.round((r.tokens / context.window) * 100),
+        }
+      : l,
+  )
 }
 
 // Cuánto quitaría /purgar, en tokens: las salidas largas menos las últimas.
@@ -179,22 +237,33 @@ async function calcularPurgable($: EngineInterface) {
 }
 
 // Cada minuto: si la ventana de 5 h acaba de reiniciarse, la pone a 0 sin esperar
-// a la siguiente respuesta (que traerá la hora nueva).
+// a la siguiente respuesta (que traerá la hora nueva); y si pasó 1 h sin
+// actividad, marca la caché como caducada.
 let pararReloj: (() => void) | undefined
 function arrancarReloj($: EngineInterface) {
   pararReloj?.()
   pararReloj = $.clock.every(60_000, async () => {
     const ahora = await $.clock.now()
-    await update($, actuales, l =>
-      l && l.reinicio5h && Date.parse(l.reinicio5h) <= ahora ? { ...l, cincoHoras: 0, reinicio5h: null } : l,
-    )
+    const frio = ultimaActividad !== undefined && ahora - ultimaActividad > CADUCIDAD
+    await update($, actuales, l => {
+      if (!l) return l
+      const reiniciado = l.reinicio5h && Date.parse(l.reinicio5h) <= ahora
+      if (!reiniciado && l.frio === frio) return l
+      return { ...l, frio, ...(reiniciado ? { cincoHoras: 0, reinicio5h: null } : {}) }
+    })
   })
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const resultado = await next(e)
-    if (!(await medir($))) await recordar($)
+    // Si no se puede saber, sin botón: la barra sigue igual.
+    hayPurgar = await $.command.list().then(
+      l => l.some(c => c.name === 'purgar'),
+      () => false,
+    )
+    if (!(await medir($, false))) await recordar($)
+    await cargarSesion($)
     await calcularPurgable($)
     arrancarReloj($)
     return resultado
@@ -235,14 +304,16 @@ export const register: Register = on => {
     // A la derecha, el % de contexto y, cuando compensa, el botón de purgar. No
     // mientras trabaja: la compactación no se puede lanzar a mitad de un turno.
     const contexto = l.contexto === null ? null : `contexto ${l.contexto}%`
-    const conBoton = hayPurgar && l.tokens > 0 && l.purgable >= PARTE_PURGA * l.tokens && !e.props.isWorking
+    const parte = l.frio ? PARTE_PURGA_GRATIS : PARTE_PURGA
+    const conBoton = hayPurgar && l.tokens > 0 && l.purgable >= parte * l.tokens && !e.props.isWorking
+    const etiquetaBoton = l.frio ? 'Purgar gratis' : 'Purgar'
     const purgar = () => {
       $.command.run({ command: 'purgar' }).catch((err: unknown) => {
         $.ui.toast(`No se pudo purgar: ${err instanceof Error ? err.message : String(err)}`)
       })
     }
     // Lo que ocupa en la terminal: la etiqueta, y "[ Purgar ]" con su hueco.
-    const anchoDerecha = (contexto?.length ?? 0) + (conBoton ? 11 : 0)
+    const anchoDerecha = (contexto?.length ?? 0) + (conBoton ? etiquetaBoton.length + 5 : 0)
 
     // Una línea con los dos límites, cada uno en su mitad: "5 h 28%" y la barra
     // estirada hasta el final de su mitad. Siempre una sola línea de alto.
@@ -293,8 +364,8 @@ export const register: Register = on => {
                 </Text>
               ) : null}
               {conBoton ? (
-                <Button key="purgar" dimColor onPress={purgar}>
-                  Purgar
+                <Button key="purgar" dimColor={!l.frio} onPress={purgar}>
+                  {etiquetaBoton}
                 </Button>
               ) : null}
             </Box>

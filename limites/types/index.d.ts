@@ -5,6 +5,8 @@
 // contexto: el % de la ventana de contexto en uso, null si no se sabe.
 // tokens: el contexto en uso, en tokens (0 si no se sabe).
 // purgable: lo que quitaría /purgar, estimado en tokens con sus mismas reglas.
+// frio: la caché de la sesión ya ha caducado (más de 1 h sin actividad), así que
+// purgar ahora no pierde nada.
 export type Limites = {
   cincoHoras: number | null
   semana: number | null
@@ -13,6 +15,7 @@ export type Limites = {
   contexto: number | null
   tokens: number
   purgable: number
+  frio: boolean
 }
 
 declare module 'claude-code' {

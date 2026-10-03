@@ -24,6 +24,20 @@ const MARCA = 'purgar'
 const PROTEGIDAS = 10
 // Una salida más corta que esto cuesta menos que la línea que la sustituiría.
 const MINIMO = 1000
+// Caracteres por token, para estimar lo quitado cuando no se sabe el contexto de
+// antes. Medido en dos purgas reales el 3 oct 2026: ~1,6 y ~1,9. Repetido en
+// limites, como las dos reglas de arriba.
+const CARACTERES_POR_TOKEN = 2
+// Lo que dura la caché sin usarse, a lo sumo. Pasado esto hay que reescribirla
+// entera igualmente, así que purgar no pierde nada: sale gratis.
+export const CADUCIDAD = 60 * 60_000
+
+// Por sesión: cuándo acabó su último turno y con cuánto contexto. Sirve para
+// saber, al purgar, el contexto de antes en una sesión retomada (que no lo sabe
+// hasta responder) y si la caché ya había caducado. ⚠️ limites lleva su propio
+// registro igual, en su almacén.
+type Registro = Record<string, { t: number; tokens: number }>
+const SESIONES_GUARDADAS = 30
 
 // Dónde empieza cada intercambio: un mensaje tuyo con texto, que no sea la
 // respuesta de una herramienta. Cortar ahí nunca separa una llamada a una
@@ -122,9 +136,33 @@ function k(tokens: number) {
   return `${Math.round(tokens / 1000)}k`
 }
 
-// El contexto antes de la última purga, hasta que la primera respuesta diga el
-// de después y se pueda avisar del ahorro de verdad.
-let antes: number | undefined
+// Lo que se ve de una conversación, en caracteres: textos y salidas.
+export function caracteres(mensajes: readonly SessionMessage[]) {
+  return mensajes.reduce(
+    (n, m) => n + m.text.length + (m.toolResults ?? []).reduce((r, x) => r + x.text.length, 0),
+    0,
+  )
+}
+
+// El aviso tras la primera respuesta. `frio`: la caché había caducado (true), no
+// (false) o no se sabe (undefined, una sesión sin registro). `antes` falta si no
+// se sabe el contexto de antes: se estima con lo quitado.
+export function avisoDeAhorro(antes: number | undefined, quitados: number, despues: number, frio?: boolean) {
+  const estimado = antes === undefined
+  const previo = antes ?? despues + Math.round(quitados / CARACTERES_POR_TOKEN)
+  const vueltas = amortizacion(previo, despues)
+  if (vueltas === null) return `La purga no bajó el contexto (${k(previo)} → ${k(despues)})`
+  const cifras =
+    `Purga: ${estimado ? '~' : ''}${k(previo)} → ${k(despues)} de contexto ` +
+    `(−${Math.round((1 - despues / previo) * 100)} %${estimado ? ', estimado' : ''})`
+  if (frio === true) return `${cifras}. Gratis: la caché ya había caducado`
+  if (frio === false) return `${cifras}; se amortiza en unas ${vueltas} peticiones`
+  return `${cifras}. Si la sesión llevaba más de 1 h parada, ha salido gratis; si no, se amortiza en unas ${vueltas} peticiones`
+}
+
+// La última purga, hasta que la primera respuesta diga el contexto de después y
+// se pueda avisar del ahorro de verdad.
+let pendiente: { antes?: number; quitados: number; frio?: boolean } | undefined
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -157,7 +195,13 @@ export const register: Register = on => {
 
     const recorte = m[1] ? quedarse(e.messages, Number(m[1])) : aligerar(e.messages)
     if ('saltar' in recorte) return { skip: recorte.saltar }
-    antes = (await $.session.usage()).context.tokens
+    const registro = (((await $.store.get('sesiones')) as Registro | undefined) ?? {})[await $.session.id()]
+    const ahora = await $.clock.now()
+    pendiente = {
+      antes: (await $.session.usage()).context.tokens || registro?.tokens,
+      quitados: caracteres(e.messages) - caracteres(recorte.mensajes),
+      frio: registro ? ahora - registro.t > CADUCIDAD : undefined,
+    }
     $.ui.toast(recorte.aviso)
     return { messages: recorte.mensajes }
   })
@@ -165,18 +209,24 @@ export const register: Register = on => {
   // La primera respuesta tras purgar trae el contexto de verdad: el ahorro real.
   on('turn.complete', async ($, e, next) => {
     const resultado = await next(e)
-    if (antes === undefined || e.agentId !== undefined) return resultado
+    if (e.agentId !== undefined) return resultado
     const despues = (await $.session.usage()).context.tokens
-    if (despues === undefined) return resultado
-    const previo = antes
-    antes = undefined
-    const vueltas = amortizacion(previo, despues)
-    $.ui.toast(
-      vueltas === null
-        ? `La purga no bajó el contexto (${k(previo)} → ${k(despues)})`
-        : `Purga: ${k(previo)} → ${k(despues)} de contexto (−${Math.round((1 - despues / previo) * 100)} %); ` +
-            `se amortiza en unas ${vueltas} peticiones`,
-    )
+    if (!despues) return resultado
+
+    // Apuntar este turno: cuándo y con cuánto contexto. Solo las más recientes.
+    const id = await $.session.id()
+    const ahora = await $.clock.now()
+    const registro = ((await $.store.get('sesiones')) as Registro | undefined) ?? {}
+    const recientes = Object.entries({ ...registro, [id]: { t: ahora, tokens: despues } })
+      .sort(([, a], [, b]) => b.t - a.t)
+      .slice(0, SESIONES_GUARDADAS)
+    await $.store.set('sesiones', Object.fromEntries(recientes))
+
+    if (pendiente !== undefined) {
+      const { antes, quitados, frio } = pendiente
+      pendiente = undefined
+      $.ui.toast(avisoDeAhorro(antes, quitados, despues, frio))
+    }
     return resultado
   })
 }
