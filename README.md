@@ -73,6 +73,8 @@ Lo instalado es una **copia** en caché: editar aquí no cambia nada hasta actua
 3. Subir `version` en `limites/.claude-plugin/plugin.json` (sin subirla no se actualiza).
 4. `claude plugin marketplace update mis-mods && claude plugin update limites@mis-mods`
 5. En una sesión abierta, `/reload-plugins`; si no, se carga en la siguiente.
+6. `git commit` y `git push`, para que lo reciban los demás (lo instalan desde GitHub;
+   en este Mac el catálogo apunta a esta carpeta, no al repo).
 
 Para probar sin instalar: `claude --plugin-dir ~/Documents/code/claude-mods/limites`.
 
