@@ -48,8 +48,8 @@ A la derecha, el % de la ventana de contexto de la sesión.
   línea de texto (`━━━───`) de tantas casillas como quepan.
 - **Botón [Purgar]**, solo si está instalado el mod `purgar` y `/purgar` quitaría **al
   menos el 40 % del contexto**. Lo calcula con las mismas reglas que `/purgar` (están
-  repetidas en los dos mods: si cambian en uno, cambiarlas en el otro), estimando 3
-  caracteres por token, a la baja. Por debajo del 40 %, perder la caché cuesta más de lo
+  repetidas en los dos mods: si cambian en uno, cambiarlas en el otro), estimando 2
+  caracteres por token (medido en dos purgas reales: ~1,6 y ~1,9). Por debajo del 40 %, perder la caché cuesta más de lo
   que se ahorra, así que si sale el botón, compensa. No sale mientras Claude está
   trabajando. Pulsarlo es lo mismo que escribir `/purgar`.
 - **Se actualiza durante el turno**, tras cada herramienta, y no solo al acabar: en un
@@ -94,7 +94,12 @@ con los precios de la API, quitar el 19 % tarda unas 80 peticiones en amortizars
 40 %, unas 25. **Primera prueba real (3 oct 2026, versión 0.1.0, que protegía los 3
 últimos intercambios): de 292k a 237k, −19 %. No compensó**: lo pesado estaba en los
 intercambios protegidos. Para cambiar de tema es gratis abrir una sesión nueva, y
-`/purgar N` quita mucho más. Cómo cuenta el plan Pro la caché no es público: la
+`/purgar N` quita mucho más. **Segunda prueba (3 oct 2026, versión 0.2.0)**, en una
+sesión de una semana antes: **de 319k a 184k, −42 %**. Y salió gratis: tras más de una
+hora parada la caché ya ha caducado y hay que reescribirla de todos modos, así que
+**purgar al retomar una sesión vieja siempre compensa**. Ojo: el aviso de la app
+(«se ahorraron 248k tokens») es una estimación suya; la cifra real es la del aviso de
+`purgar`. Cómo cuenta el plan Pro la caché no es público: la
 dirección es la misma, la proporción puede no serlo.
 
 No llama a modelos, no lee ficheros, no lanza procesos ni toca la red.

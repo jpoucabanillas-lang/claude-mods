@@ -20,9 +20,10 @@ const PARTE_PURGA = 0.4
 // distintos y no pueden importarse): si cambian allí, cambiarlas aquí.
 const PROTEGIDAS = 10
 const MINIMO = 1000
-// Caracteres por token de las salidas de herramientas (logs, código), a la baja:
-// mejor que el botón salga de menos que de más.
-const CARACTERES_POR_TOKEN = 3
+// Caracteres por token de las salidas de herramientas (logs, código). Medido en
+// dos purgas reales el 3 oct 2026: ~1,6 y ~1,9. Se redondea al alza, a 2, para
+// que el botón salga de menos más que de más.
+const CARACTERES_POR_TOKEN = 2
 // Si el mod purgar está instalado (su /purgar existe). Sin él no hay botón.
 let hayPurgar = false
 

@@ -173,16 +173,17 @@ test('con el mod purgar, el botón [Purgar] sale cuando quitaría el 40 % del co
     return <Box />
   })
 
-  // 20 salidas: se quitarían las 10 viejas, 90 000 caracteres ≈ 30k tokens. El
-  // 30 %: no compensa.
+  // 12 salidas: se quitarían las 2 viejas, 18 000 caracteres ≈ 9k tokens. El
+  // 9 %: no compensa.
+  mensajes = salidas(12)
   await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
   let banda = await $.ui.mount({ ...BANDA, surface: 'terminal' })
   expect(await banda.find({ text: /^contexto 10%$/ })).toBeDefined()
   expect(await banda.find({ type: 'Button' })).toBeUndefined()
   await banda.unmount()
 
-  // 30 salidas: 20 viejas, 180 000 caracteres ≈ 60k tokens. El 60 %: sale.
-  mensajes = salidas(30)
+  // 20 salidas: 10 viejas, 90 000 caracteres ≈ 45k tokens. El 45 %: sale.
+  mensajes = salidas(20)
   await $.turn.complete({ ...PASO, turnId: 't1' })
   for (const surface of ['terminal', 'desktop'] as const) {
     const b = await $.ui.mount({ ...BANDA, surface })
