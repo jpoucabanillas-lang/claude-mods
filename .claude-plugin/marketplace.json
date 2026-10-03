@@ -1,0 +1,13 @@
+{
+  "name": "mis-mods",
+  "owner": {
+    "name": "Jenaro"
+  },
+  "plugins": [
+    {
+      "name": "limites",
+      "source": "./limites",
+      "description": "Una línea fina encima del prompt con el uso de los límites de 5 horas y semanal"
+    }
+  ]
+}

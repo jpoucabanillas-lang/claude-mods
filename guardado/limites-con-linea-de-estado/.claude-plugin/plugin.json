@@ -1,0 +1,6 @@
+{
+  "name": "limites",
+  "version": "0.5.1",
+  "description": "Una línea fina encima del prompt con el uso de los límites de 5 horas y semanal",
+  "types": "./types/index.d.ts"
+}
